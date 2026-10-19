@@ -1,6 +1,6 @@
 {
   "name": "dsh-notion-local-tools",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "DSH local file tools for a user-configured notion2api endpoint",
   "type": "module",
   "main": "index.mjs",

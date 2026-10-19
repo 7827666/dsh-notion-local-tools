@@ -110,7 +110,14 @@ export function createAdapter(ctx, configuration = {}) {
   };
   return {
     providerInfo(id) { return { id, name: optionsOf().displayName ?? 'Notion · 本地工具' }; },
-    providerRetryPolicy() { return undefined; },
+    providerRetryPolicy() {
+      // A failed response may leave the upstream agent running; never replay it automatically.
+      return {
+        mode: 'normal', maxRetries: 0,
+        retryableCodes: ['EMPTY_RESPONSE', 'RATE_LIMIT', 'SERVER', 'TIMEOUT', 'TRANSPORT'],
+        initialDelayMs: 500, maxDelayMs: 10000, jitterRatio: 0.1,
+      };
+    },
     imageRequestPricing() { return undefined; },
     async listModels(id) { return models().map(model => info(id, model.id)); },
     async resolveModel(id, model) { return info(id, model); },
@@ -120,6 +127,27 @@ export function createAdapter(ctx, configuration = {}) {
       return { model: await prepared.resolveModel(id, model), stream: options => prepared.stream(options) };
     },
     async *stream(options) {
+      // DSH titles are auxiliary requests. Keep them local to avoid a second
+      // Notion job racing the user's actual request on every new session.
+      if (options.purpose === 'session-title') {
+        options.signal?.throwIfAborted();
+        let title = 'Notion 本地工具会话';
+        const frame = options.messages?.[0]?.content?.find(block => block.type === 'text')?.text ?? '';
+        const prefix = 'Generate the session title from this JSON array of human messages:\n';
+        if (frame.startsWith(prefix)) {
+          try {
+            const first = JSON.parse(frame.slice(prefix.length))?.[0]?.text;
+            if (typeof first === 'string' && first.trim()) {
+              title = Array.from(first.replace(/[\x00-\x1f\x7f]+/g, ' ').replace(/\s+/g, ' ').trim()).slice(0, 32).join('');
+            }
+          } catch {}
+        }
+        yield { type: 'block-start', index: 0, blockType: 'text' };
+        yield { type: 'text-delta', index: 0, text: title };
+        yield { type: 'block-end', index: 0, block: { type: 'text', text: title } };
+        yield { type: 'finish', reason: { kind: 'stop' } };
+        return;
+      }
       const config = optionsOf();
       const baseURL = normalizeBaseURL(config.baseURL);
       const body = encodeRequest(options);
@@ -128,7 +156,7 @@ export function createAdapter(ctx, configuration = {}) {
       const key = typeof resolved === 'string' ? resolved : resolved?.value;
       if (!key) throw failure('configured DSH credential is unavailable', 'AUTH');
       const signal = AbortSignal.any([
-        AbortSignal.timeout(config.timeoutMs ?? 90_000),
+        AbortSignal.timeout(config.timeoutMs ?? 330_000),
         ...(options.signal ? [options.signal] : []),
       ]);
       let response;
@@ -137,27 +165,38 @@ export function createAdapter(ctx, configuration = {}) {
           method: 'POST', signal,
           headers: {
             authorization: `Bearer ${key}`, 'content-type': 'application/json',
-            'user-agent': 'deepseek-harness-notion-local-tools/0.1.0 (+https://github.com/deepseek-ai/deepseek-harness)',
+            'user-agent': 'deepseek-harness-notion-local-tools/0.1.1 (+https://github.com/deepseek-ai/deepseek-harness)',
             ...(options.sessionId ? { 'x-deepseek-harness-session-id': String(options.sessionId) } : {}),
           },
           body: JSON.stringify(body),
         });
       } catch {
         if (options.signal?.aborted) throw failure('request cancelled', 'ABORTED');
-        throw failure(signal.aborted ? 'upstream request timed out' : 'upstream transport failed', 'TRANSPORT');
+        throw failure(signal.aborted
+          ? 'upstream request timed out; it may still be running. Do not automatically resubmit.'
+          : 'upstream transport failed', 'TRANSPORT');
       }
       if (!response.ok) {
-        // Do not log arbitrary upstream bodies, credential values, prompts or file contents.
-        await response.body?.cancel();
+        // Read only an allowlisted error code; never echo upstream prose or detail.
+        let upstreamCode;
+        try { upstreamCode = (await response.json())?.error?.code; } catch {}
+        const hints = {
+          AGENT_BUSY: 'Notion already has a running request; no new task was submitted. Wait for it to finish.',
+          AGENT_PENDING: 'Notion may still be running. The original task was retained; do not submit duplicate tasks.',
+          AGENT_UNKNOWN: 'The original Notion task state is unknown and its ID was retained. Check it before resubmitting.',
+          AGENT_AUTH: 'Notion authentication failed while checking the retained task.',
+        };
+        const hint = Object.hasOwn(hints, upstreamCode) ? hints[upstreamCode] : undefined;
         const code = response.status === 401 || response.status === 403 ? 'AUTH'
           : response.status === 429 ? 'RATE_LIMIT'
-            : response.status >= 500 ? 'SERVER' : 'INVALID_REQUEST';
-        throw failure(`upstream HTTP ${response.status}`, code, response.status);
+            : response.status === 504 ? 'TIMEOUT'
+              : response.status >= 500 ? 'SERVER' : 'INVALID_REQUEST';
+        throw failure(hint ?? `upstream HTTP ${response.status}`, code, response.status);
       }
       let data;
       try { data = await response.json(); } catch (error) {
         if (options.signal?.aborted) throw failure('request cancelled', 'ABORTED');
-        if (signal.aborted) throw failure('upstream request timed out', 'TRANSPORT');
+        if (signal.aborted) throw failure('upstream request timed out; it may still be running. Do not automatically resubmit.', 'TRANSPORT');
         if (error instanceof SyntaxError) throw failure('upstream did not return JSON');
         throw failure('upstream transport failed while reading response', 'TRANSPORT');
       }

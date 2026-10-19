@@ -28,10 +28,12 @@ https://github.com/5483666/dsh-notion-local-tools
 在已安装 DSH 的电脑终端执行：
 
 ```bash
-dsh plugin --profile web add "https://github.com/5483666/dsh-notion-local-tools/releases/download/v0.1.0/dsh-notion-local-tools-0.1.0.tgz"
+dsh plugin --profile web add "https://github.com/5483666/dsh-notion-local-tools/releases/download/v0.1.1/dsh-notion-local-tools-0.1.1.tgz"
 ```
 
 这条命令安装预打包插件并启用其 DSH bundle，不需要运行本项目构建脚本。使用其他 DSH profile 时，将 `web` 换成实际名称；桌面版请使用其自带的插件安装入口或终端。
+
+从旧版本升级时，先等待正在运行的任务结束并关闭同一 profile 的 DSH 服务，再运行上面的安装命令，随后重新启动向导。新代码需要重启 DSH 才能完整生效；保留原有配置和默认模型，不要重复注册提供方。
 
 也可以从源码安装：
 
@@ -79,6 +81,8 @@ DSH 的工具定义、文本历史和实际工具结果被编码为文本，发�
 - 默认两个模型已在原适配中验证；其他模型即使出现在服务列表里，也需要单独验证结构化输出和工具循环。
 - 不支持图片输入。文件操作不是逐 token 输出；每轮携带工具说明和必要历史，会增加输入与延迟。
 - 上游认证失效、502、轮询超时仍可能失败。插件保留 DSH 的错误分类与取消，不承诺所有服务或模型长期稳定。
+- DSH 的会话标题在本地截取首条消息生成，不额外调用 Notion；正常工具调用仍由 DSH 执行。
+- 客户端每轮默认等待 330 秒，可配合服务端 300 秒等待预算；客户端设置不会自动改变上游服务器的超时；可通过插件的 `timeoutMs` 配置覆盖（1000–600000 毫秒）。此提供商禁用 DSH 自动重发：超时或网络错误后，上游任务可能仍在运行，先检查其状态，避免自动或重复提交。工具结果返回后的下一轮模型调用仍照常进行。
 - 源码使用跨平台 Node.js API；实际 DSH 集成验收以发行说明列出的系统为准，不能把单元测试等同于另一台电脑的现场验证。
 
 ## 停用 / 卸载

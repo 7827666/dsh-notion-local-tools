@@ -38,6 +38,7 @@ test('only complete structured output can request an advertised local tool', () 
 
 test('real HTTP transport produces DSH tool-call chunks and sanitizes upstream failures', async (t) => {
   let status = 200;
+  let upstreamCode;
   const requests = [];
   const server = createServer(async (req, res) => {
     let raw = '';
@@ -46,7 +47,7 @@ test('real HTTP transport produces DSH tool-call chunks and sanitizes upstream f
     res.writeHead(status, { 'content-type': 'application/json' });
     res.end(JSON.stringify(status === 200 ? {
       choices: [{ message: { content: '{"tool_calls":[{"name":"read","arguments":{"path":"input.txt"}}]}' } }],
-    } : { error: { message: 'sensitive-upstream-body' } }));
+    } : { error: { code: upstreamCode, message: 'sensitive-upstream-body' } }));
   });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
@@ -68,4 +69,18 @@ test('real HTTP transport produces DSH tool-call chunks and sanitizes upstream f
   await assert.rejects(async () => Array.fromAsync(adapter.stream(input)), e => e.code === 'AUTH' && !e.message.includes('sensitive-upstream-body'));
   status = 502;
   await assert.rejects(async () => Array.fromAsync(adapter.stream(input)), e => e.failure?.code === 'SERVER' && e.failure?.status === 502 && !e.message.includes('sensitive-upstream-body'));
+  status = 409; upstreamCode = 'AGENT_BUSY';
+  await assert.rejects(async () => Array.fromAsync(adapter.stream(input)), e => e.failure?.code === 'INVALID_REQUEST' && /no new task/.test(e.message) && !e.message.includes('sensitive-upstream-body'));
+  status = 504; upstreamCode = 'AGENT_UNKNOWN';
+  await assert.rejects(async () => Array.fromAsync(adapter.stream(input)), e => e.failure?.code === 'TIMEOUT' && /retained/.test(e.message) && !e.message.includes('sensitive-upstream-body'));
+});
+
+test('DSH session title is generated locally without credentials or an upstream request', async () => {
+  const adapter = createAdapter({ credentials: { resolve() { throw new Error('title must stay local'); } } });
+  const chunks = await Array.fromAsync(adapter.stream({
+    purpose: 'session-title',
+    messages: [{ role: 'user', content: [{ type: 'text', text: 'Generate the session title from this JSON array of human messages:\n' + JSON.stringify([{ seq: 1, text: '读取独立测试文件并保存结果' }]) }] }],
+  }));
+  assert.equal(chunks.find(c => c.type === 'text-delta').text, '读取独立测试文件并保存结果');
+  assert.equal(chunks.at(-1).reason.kind, 'stop');
 });

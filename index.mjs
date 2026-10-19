@@ -14,7 +14,7 @@ export const Config = z.object({
     maxTokens: z.number().min(1),
     inputModalities: z.array(z.string()),
   })).default(DEFAULT_MODELS).volatile(),
-  timeoutMs: z.number().min(1000).max(300000).default(90000).volatile(),
+  timeoutMs: z.number().min(1000).max(600000).default(330000).volatile(),
 });
 
 export function apply(ctx, config) {

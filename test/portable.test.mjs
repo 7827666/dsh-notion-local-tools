@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { createAdapter, normalizeBaseURL } from '../adapter.mjs';
+import { Config } from '../index.mjs';
 
 test('endpoint must be supplied locally and cannot contain credentials or query secrets', () => {
   assert.throws(() => normalizeBaseURL(undefined), /configure|address|baseURL/i);
@@ -44,7 +45,8 @@ test('body-phase timeout and cancellation remain transport and aborted failures'
     baseURL: `http://127.0.0.1:${server.address().port}/v1`, timeoutMs: 150,
   });
   await assert.rejects(Array.fromAsync(adapter.stream({ model: 'fixture', messages: [] })),
-    error => error.failure?.code === 'TRANSPORT');
+    error => error.failure?.code === 'TRANSPORT' && /still be running/.test(error.message)
+      && /Do not automatically resubmit/.test(error.message));
   const controller = new AbortController();
   const ready = new Promise(resolve => { headersSent = resolve; });
   const result = Array.fromAsync(adapter.stream({ model: 'fixture', messages: [], signal: controller.signal }));
@@ -65,4 +67,47 @@ test('a prepared call keeps its endpoint, credential reference and model configu
   await assert.rejects(Array.fromAsync(prepared.stream({ model: 'fixture', messages: [] })), error => error.failure?.code === 'AUTH');
   assert.deepEqual(refs, ['FIRST']);
   assert.equal((await adapter.resolveModel('notion-local-tools', 'fixture')).context.contextWindow, 300);
+});
+
+test('provider policy prevents DSH from automatically replaying ambiguous upstream failures', () => {
+  const policy = createAdapter({}).providerRetryPolicy();
+  assert.equal(policy?.mode, 'normal');
+  assert.equal(policy?.maxRetries, 0);
+  assert.ok(policy.retryableCodes.includes('SERVER'));
+  assert.ok(policy.retryableCodes.includes('TRANSPORT'));
+  assert.ok(policy.initialDelayMs > 0 && policy.maxDelayMs >= policy.initialDelayMs);
+  assert.ok(policy.jitterRatio >= 0 && policy.jitterRatio <= 1);
+});
+
+test('requests allow the server budget by default but honor a shorter configured timeout', async (t) => {
+  const server = createServer((req, res) => {
+    req.resume();
+    setTimeout(() => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ choices: [{ message: { content: '{"text":"fixture complete"}' } }] }));
+    }, 50);
+  });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  t.after(() => { server.closeAllConnections(); server.close(); });
+  const durations = [];
+  const originalTimeout = AbortSignal.timeout;
+  t.mock.method(AbortSignal, 'timeout', ms => { durations.push(ms); return originalTimeout(ms); });
+  const ctx = { credentials: { resolve: async () => 'fixture-key' } };
+  const config = { baseURL: `http://127.0.0.1:${server.address().port}/v1` };
+  const input = { model: 'fixture', messages: [] };
+  const completed = await Array.fromAsync(createAdapter(ctx, config).stream(input));
+  assert.equal(completed.at(-1).reason.kind, 'stop');
+  assert.deepEqual(durations, [330000]);
+  await assert.rejects(Array.fromAsync(createAdapter(ctx, { ...config, timeoutMs: 15 }).stream(input)),
+    error => error.failure?.code === 'TRANSPORT' && /still be running/.test(error.message)
+      && /Do not automatically resubmit/.test(error.message));
+  assert.deepEqual(durations, [330000, 15]);
+});
+
+test('native timeout configuration uses the extended budget and accepts operator overrides', () => {
+  assert.equal(Config({}).timeoutMs.get(), 330000);
+  assert.equal(Config({ timeoutMs: 120000 }).timeoutMs.get(), 120000);
+  assert.equal(Config({ timeoutMs: 600000 }).timeoutMs.get(), 600000);
+  assert.throws(() => Config({ timeoutMs: 600001 }));
 });
