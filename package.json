@@ -1,6 +1,6 @@
 {
   "name": "dsh-notion-local-tools",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "DSH local file tools for a user-configured notion2api endpoint",
   "type": "module",
   "main": "index.mjs",
@@ -55,11 +55,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/5483666/dsh-notion-local-tools.git"
+    "url": "git+https://github.com/7827666/dsh-notion-local-tools.git"
   },
   "bugs": {
-    "url": "https://github.com/5483666/dsh-notion-local-tools/issues"
+    "url": "https://github.com/7827666/dsh-notion-local-tools/issues"
   },
-  "homepage": "https://github.com/5483666/dsh-notion-local-tools#readme",
+  "homepage": "https://github.com/7827666/dsh-notion-local-tools#readme",
   "license": "MIT"
 }

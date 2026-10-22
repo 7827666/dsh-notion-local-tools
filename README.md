@@ -10,7 +10,7 @@
 
 ```text
 请按以下仓库的 README，在我的电脑上安装并验收 DSH 插件：
-https://github.com/5483666/dsh-notion-local-tools
+https://github.com/7827666/dsh-notion-local-tools
 
 先核对 Node.js、DSH 版本和实际使用的 profile，安装预打包 Release；不兼容时先说明。保留现有配置与默认模型，修改前备份，避免旧版重复注册和中断正在运行的任务。
 
@@ -28,7 +28,7 @@ https://github.com/5483666/dsh-notion-local-tools
 在已安装 DSH 的电脑终端执行：
 
 ```bash
-dsh plugin --profile web add "https://github.com/5483666/dsh-notion-local-tools/releases/download/v0.2.0/dsh-notion-local-tools-0.2.0.tgz"
+dsh plugin --profile web add "https://github.com/7827666/dsh-notion-local-tools/releases/download/v0.2.1/dsh-notion-local-tools-0.2.1.tgz"
 ```
 
 这条命令安装预打包插件并启用其 DSH bundle，不需要运行本项目构建脚本。使用其他 DSH profile 时，将 `web` 换成实际名称；桌面版请使用其自带的插件安装入口或终端。
@@ -38,7 +38,7 @@ dsh plugin --profile web add "https://github.com/5483666/dsh-notion-local-tools/
 也可以从源码安装：
 
 ```bash
-git clone https://github.com/5483666/dsh-notion-local-tools.git
+git clone https://github.com/7827666/dsh-notion-local-tools.git
 cd dsh-notion-local-tools
 dsh plugin --profile web add .
 ```
