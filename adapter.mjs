@@ -1,4 +1,5 @@
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
+import { setTimeout as sleep } from 'node:timers/promises';
 
 export const DEFAULT_MODELS = [
   { id: 'claude-sonnet5.5', name: 'Sonnet 5.5' },
@@ -11,6 +12,76 @@ function failure(detail, code = 'MALFORMED_RESPONSE', status) {
   return Object.assign(new Error(message), {
     code, failure: Object.freeze({ message, code, ...(status ? { status } : {}) }),
   });
+}
+
+/** Poll only the accepted job on the configured origin. Never replay its POST. */
+async function pollAcceptedJob(response, baseURL, key, signal) {
+  if (response.status !== 202) return { response };
+  const readJob = async (value, expected) => {
+    let job;
+    try { job = await value.json(); } catch (error) {
+      if (error instanceof SyntaxError) throw failure('invalid async job response');
+      throw error;
+    }
+    if (job?.object !== 'notion.agent.job' || job.status !== 'running'
+      || typeof job.job_id !== 'string' || !/^[a-f0-9]{64}$/.test(job.job_id)
+      || (expected && job.job_id !== expected)) throw failure('invalid async job identity');
+    return job;
+  };
+  let job = await readJob(response);
+  const id = job.job_id;
+  let lookupFailures = 0;
+  for (;;) {
+    const pollDelay = Number.isFinite(job.poll_after_ms) ? Math.max(250, Math.min(10000, job.poll_after_ms)) : 3000;
+    const delay = lookupFailures ? Math.max(pollDelay, Math.min(30000, 1000 * 2 ** Math.min(lookupFailures, 5))) : pollDelay;
+    await sleep(delay, undefined, { signal });
+    try {
+      response = await fetch(`${baseURL}/agent/jobs/${id}`, {
+        method: 'GET', headers: { authorization: `Bearer ${key}`, accept: 'application/json' },
+        signal: AbortSignal.any([signal, AbortSignal.timeout(20000)]),
+      });
+      if (response.status === 202) {
+        job = await readJob(response, id);
+      } else if (response.ok) {
+        // Consume the complete result inside the safe GET retry boundary.
+        const text = await response.text();
+        let result;
+        try { result = JSON.parse(text); } catch { throw failure('invalid async result response'); }
+        validateJobIdentity(result, id);
+        return { response: new Response(text, { status: response.status, headers: { 'content-type': 'application/json' } }), acceptedId: id };
+      } else if ([502, 503, 504].includes(response.status)) {
+        // A gateway error does not terminate the accepted upstream task. Read
+        // the body before retrying; explicit bridge errors remain terminal.
+        const text = await response.text();
+        let code;
+        try { code = JSON.parse(text)?.error?.code; } catch {}
+        if (typeof code === 'string' && code.startsWith('AGENT_')) {
+          return { response: new Response(text, { status: response.status, headers: { 'content-type': 'application/json' } }), acceptedId: id };
+        }
+        throw new Error('temporary job status response');
+      } else {
+        return { response, acceptedId: id };
+      }
+    } catch (error) {
+      if (error?.failure || signal.aborted) throw error;
+      lookupFailures++;
+      // The caller's total deadline bounds recovery; only this GET repeats.
+      continue; // GET is safe to repeat; the upstream task is not re-created.
+    }
+    lookupFailures = 0;
+  }
+}
+
+function validateJobIdentity(data, expected) {
+  if (data && Object.hasOwn(data, 'notion_job_id')
+    && (typeof data.notion_job_id !== 'string' || !/^[a-f0-9]{64}$/.test(data.notion_job_id)
+      || (expected && data.notion_job_id !== expected))) throw failure('invalid completed job identity');
+}
+
+function canonical(value) {
+  if (Array.isArray(value)) return value.map(canonical);
+  if (value && typeof value === 'object') return Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]));
+  return value;
 }
 
 function projectBlock(block) {
@@ -29,7 +100,7 @@ function projectBlock(block) {
 export function encodeRequest(options) {
   const messages = (options.messages ?? []).map(message => ({
     role: message.role,
-    ...(message.role === 'tool' ? { callId: message.source?.callId, isError: message.isError ?? false } : {}),
+    ...(message.role === 'tool' ? { callId: message.source?.callId ?? message.toolCallId, isError: message.isError ?? false } : {}),
     content: (message.content ?? []).map(projectBlock).filter(Boolean),
   }));
   const tools = (options.tools ?? []).map(({ name, description, parameters }) => ({ name, description, parameters }));
@@ -45,8 +116,12 @@ export function encodeRequest(options) {
     'For a final answer with no more tools: {"text":"your answer"}. Do not mix text and tool_calls.',
     'Never fabricate tool results. When a task requires reading a file, request the read before writing based on its contents.',
     'For dependent calls, request one step, wait for the actual result, then decide the next step.',
+    'This bridge accepts text input only. Do not claim to have inspected images or used a tool requiring image input.',
+    'Only actual DSH tool results establish a local file operation. Notion cloud paths and session-file:// artifacts are not Mac outputs.',
   ].join('\n');
   const content = `${protocol}\n\nDSH_REQUEST_JSON:\n${JSON.stringify({
+    protocol: 'dsh-local-tools-v2',
+    capabilities: { inputModalities: ['text'], localExecution: 'dsh', nativeNotionTools: false },
     ...(options.system ? { system: options.system } : {}),
     available_tools: tools, conversation: messages,
     ...(options.purpose ? { purpose: options.purpose } : {}),
@@ -156,7 +231,7 @@ export function createAdapter(ctx, configuration = {}) {
       const key = typeof resolved === 'string' ? resolved : resolved?.value;
       if (!key) throw failure('configured DSH credential is unavailable', 'AUTH');
       const signal = AbortSignal.any([
-        AbortSignal.timeout(config.timeoutMs ?? 330_000),
+        AbortSignal.timeout(config.timeoutMs ?? 1_860_000),
         ...(options.signal ? [options.signal] : []),
       ]);
       let response;
@@ -164,8 +239,9 @@ export function createAdapter(ctx, configuration = {}) {
         response = await fetch(`${baseURL}/chat/completions`, {
           method: 'POST', signal,
           headers: {
-            authorization: `Bearer ${key}`, 'content-type': 'application/json',
-            'user-agent': 'deepseek-harness-notion-local-tools/0.1.1 (+https://github.com/deepseek-ai/deepseek-harness)',
+            authorization: `Bearer ${key}`, 'content-type': 'application/json', 'x-notion-async': '1',
+            'x-notion-local-protocol': 'dsh-local-tools-v2',
+            'user-agent': 'deepseek-harness-notion-local-tools/0.2.0 (+https://github.com/deepseek-ai/deepseek-harness)',
             ...(options.sessionId ? { 'x-deepseek-harness-session-id': String(options.sessionId) } : {}),
           },
           body: JSON.stringify(body),
@@ -176,6 +252,14 @@ export function createAdapter(ctx, configuration = {}) {
           ? 'upstream request timed out; it may still be running. Do not automatically resubmit.'
           : 'upstream transport failed', 'TRANSPORT');
       }
+      let acceptedId;
+      try { ({ response, acceptedId } = await pollAcceptedJob(response, baseURL, key, signal)); } catch (error) {
+        if (error?.failure) throw error;
+        if (options.signal?.aborted) throw failure('request cancelled; the accepted upstream task was retained', 'ABORTED');
+        throw failure(signal.aborted
+          ? 'waiting for the accepted task timed out; its upstream result may still arrive. Do not automatically resubmit.'
+          : 'job status lookup failed; the original task was retained. Do not automatically resubmit.', 'TRANSPORT');
+      }
       if (!response.ok) {
         // Read only an allowlisted error code; never echo upstream prose or detail.
         let upstreamCode;
@@ -185,6 +269,12 @@ export function createAdapter(ctx, configuration = {}) {
           AGENT_PENDING: 'Notion may still be running. The original task was retained; do not submit duplicate tasks.',
           AGENT_UNKNOWN: 'The original Notion task state is unknown and its ID was retained. Check it before resubmitting.',
           AGENT_AUTH: 'Notion authentication failed while checking the retained task.',
+          AGENT_NOT_FOUND: 'The accepted task could not be found. Do not automatically submit a replacement.',
+          AGENT_PROTOCOL: 'Notion did not return a valid local tool decision; no local action was fabricated.',
+          AGENT_REQUIRES_ACTION: 'Notion requested a cloud-side action; no local tool was executed.',
+          AGENT_INTERRUPTED: 'The original Notion turn was interrupted; no replacement was submitted.',
+          AGENT_UPSTREAM_FAILED: 'The original Notion turn failed; its task was retained without resubmission.',
+          AGENT_SUPERSEDED: 'Another message changed the Notion thread; no old result was returned as this turn.',
         };
         const hint = Object.hasOwn(hints, upstreamCode) ? hints[upstreamCode] : undefined;
         const code = response.status === 401 || response.status === 403 ? 'AUTH'
@@ -200,10 +290,16 @@ export function createAdapter(ctx, configuration = {}) {
         if (error instanceof SyntaxError) throw failure('upstream did not return JSON');
         throw failure('upstream transport failed while reading response', 'TRANSPORT');
       }
+      validateJobIdentity(data, acceptedId);
       const reply = decodeReply(data.choices?.[0]?.message?.content, options.tools);
       if (reply.toolCalls) {
+        const requestHash = createHash('sha256').update(JSON.stringify(body)).digest('hex');
         for (const [index, call] of reply.toolCalls.entries()) {
-          const id = `call_${randomUUID().replaceAll('-', '')}`;
+          // Re-reading a retained decision must not invent another call identity.
+          // Stable IDs do not replace DSH's permission and execution safeguards.
+          const identity = JSON.stringify([baseURL, options.sessionId ?? '', data.notion_job_id ?? acceptedId ?? requestHash,
+            index, call.name, canonical(JSON.parse(call.arguments))]);
+          const id = `call_${createHash('sha256').update(identity).digest('hex').slice(0, 32)}`;
           yield { type: 'block-start', index, blockType: 'tool-call' };
           yield { type: 'tool-call-delta', index, id, name: call.name, argumentsDelta: call.arguments };
           yield { type: 'block-end', index, block: { type: 'tool-call', id, ...call } };

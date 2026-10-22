@@ -98,16 +98,16 @@ test('requests allow the server budget by default but honor a shorter configured
   const input = { model: 'fixture', messages: [] };
   const completed = await Array.fromAsync(createAdapter(ctx, config).stream(input));
   assert.equal(completed.at(-1).reason.kind, 'stop');
-  assert.deepEqual(durations, [330000]);
+  assert.deepEqual(durations, [1860000]);
   await assert.rejects(Array.fromAsync(createAdapter(ctx, { ...config, timeoutMs: 15 }).stream(input)),
     error => error.failure?.code === 'TRANSPORT' && /still be running/.test(error.message)
       && /Do not automatically resubmit/.test(error.message));
-  assert.deepEqual(durations, [330000, 15]);
+  assert.deepEqual(durations, [1860000, 15]);
 });
 
 test('native timeout configuration uses the extended budget and accepts operator overrides', () => {
-  assert.equal(Config({}).timeoutMs.get(), 330000);
+  assert.equal(Config({}).timeoutMs.get(), 1860000);
   assert.equal(Config({ timeoutMs: 120000 }).timeoutMs.get(), 120000);
-  assert.equal(Config({ timeoutMs: 600000 }).timeoutMs.get(), 600000);
-  assert.throws(() => Config({ timeoutMs: 600001 }));
+  assert.equal(Config({ timeoutMs: 3600000 }).timeoutMs.get(), 3600000);
+  assert.throws(() => Config({ timeoutMs: 3600001 }));
 });
